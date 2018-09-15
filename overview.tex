@@ -1,0 +1,374 @@
+\documentclass{article}
+\usepackage[outer=5in, inner=3in,left=.7in,right=1.6in,top=.6in,bottom=.6in]{geometry}
+
+\usepackage[table]{xcolor}
+\usepackage[english]{babel}
+\usepackage[hidelinks]{hyperref}
+\usepackage[utf8]{inputenc}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+
+\begin{document}
+\title{Draft: Overview of Caching Algorithms}
+\author{Daniel S. Berger \\ Computer Science Department \\ Carnegie Mellon University}
+\maketitle
+
+
+This document introduces terminology and design constraints for Internet content caching systems and discusses the state of the art.
+Specifically, \autoref{sec:hocgoals} discusses the design goal of building caching systems for CDNs and data centers.
+\autoref{bg:priorwork:cachingsystems} discusses the state of the art in academic caching systems.
+\autoref{sec:bg:perfmodel} discusses the state of the art in cache performance modeling and evaluation.
+And, \autoref{sec:background:optimal} discusses the state of the art in deriving optimal caching decisions and performance bounds.
+
+\section{Caching System Design Goals}\label{sec:hocgoals}
+
+Caches are deployed in many places throughout the Internet and in various places in computers themselves.
+These different deployment scenarios lead to a multitude of performance metrics and design constraints.
+This section introduces key notation, metrics and constraints that apply to CDN and aggregation caches.
+
+At a high level there are three key design goals: we seek to maximize the hit ratio or minimize the tail latency, while maintaining a robust and scalable system, and avoiding adverse side-effects on second-level caches.
+
+% hit ratios
+
+% hit ratio alone is not enough
+
+% latency
+
+% effect on other systems
+% overhead
+% concurrency
+
+% operational robustness
+% number of parameters
+% adaptibility
+
+
+\subsection{Maximizing hit ratios, minimizing miss ratios and latencies.}
+
+The classical performance metric in caching system design is the \emph{hit ratio}, i.e., the number of requests that are served by the cache divided by the number of total requests.
+Conversely, the \emph{miss ratio} is $1-hit\;ratio$.
+As object sizes are variable in CDNs and aggregation caches, the hit ratio can be measured as either assigning an equal weight to every request, or as assigning a weight proportional to the size of each requested object.
+This leads to four metrics: OHR and OMR (for equal weight) and BHR and BMR (for weight proportional to size).
+
+\begin{description}
+\item[\textbf{O}bject \textbf{H}it \textbf{R}atio (OHR)] $=$ {\Large $\frac{\#\text{cache hits}}{\#\text{requests}}$}
+\item[\textbf{O}bject \textbf{M}iss \textbf{R}atio (OMR)] $=$ {\Large $\frac{\#cache misses}{\#requests}$}
+\item[\textbf{B}yte \textbf{H}it \textbf{R}atio (BHR)] $=$ {\Large $\frac{\text{sum of bytes of with cache hits}}{\text{sum of bytes}}$}
+\item[\textbf{B}yte \textbf{M}iss \textbf{R}atio (BMR)] $=$ {\Large $\frac{\text{sum of bytes of with cache misses}}{\text{sum of bytes}}$}
+\end{description}
+
+\paragraph{CDN caches.}
+The HOC's primary design objective is user performance, which it optimizes by providing fast responses for as many requests as possible.
+A natural way to measure this objective is the OHR, which gives equal weight to all user requests.
+Another important reason why CDNs focus on OHR in their HOCs is that HOCs are good at serving small objects, whereas, small objects are a problem for the DC.
+Specifically, every HOC cache miss typically requires a random read from the DC (an I/O operation), which is very slow on the spinning disks typically found in CDN deployments.
+Thus, improving the OHR/OMR typically leads to faster responses from the CDN server as the disk is less busy: if a HOC miss occurs, the DC's work queue is shorter.
+In summary, HOCs in production deployments at Akamai, Fastly~\cite{fastly2016} and Wikipedia~\cite{wikivarnish}, all seek to maximize the OHR, or minimize the OMR, of the HOC.
+
+The BHR and BMR metric is less relevant to the HOC.
+While the much larger DC focuses on the BHR~\cite{sitaraman2014overlay}, the HOC has little impact on the BHR as it is typically three orders of magnitude smaller than the DC.
+
+\paragraph{Aggregation caches.}
+While hit ratio variants are an important metric for CDN performance, hit ratio is less well defined for the caches in aggregation servers in data centers.
+Specifically, as each request requires the results from many subqueries, full requests hits are rare as query results to all backends need to be in the cache.
+The key performance metric instead is the \emph{tail latency}, which is the request latency at a high percentile such as the 99-th percentile.
+
+
+\subsection{Robustness against changing request patterns.}
+All caches on the Internet request path are subjected to a variety of traffic changes each day.
+
+\paragraph{CDN caches.}
+For HOCs, web content popularity changes during the day (e.g., news in the morning vs. video at night), which includes rapid changes due to flash crowds.
+Another source of traffic changes is the sharing of the server infrastructure between traffic classes.
+Such classes include  web sites, videos, software downloads, and interactive applications from thousands of content providers~\cite{NygrenSS10}.
+As a shared infrastructure is more cost effective, a CDN server typically serves a mix of traffic classes.
+Due to load balancing decisions, this mix can change abruptly.
+This poses a particular challenge as each traffic class has its own distinctive request and object size distribution statistics: large objects can be unpopular within one hour and popular during the next.
+A HOC admission policy must be able to rapidly adapt to all these changing request patterns to achieve consistently high OHRs.
+
+\paragraph{Aggregation caches.}
+In data centers there are many sources of variability besides retrieval latency.
+As in CDNs, content popularity changes significantly during the day.
+Additionally, request rates and request composition are in constant flux.
+For example, at Microsoft, news see very high request rates in the morning, and involve image, text, and advertising backend systems, but typically do not involve the store catalog backend system.
+In the evening, xbox.com becomes very popular, which often involves the store catalog backend system and various recommender systems.
+Aggregation server caches must be able to rapidly adapt to all these changing request patterns to achieve consistently low tail latencies of user requests.
+
+\subsection{Low overhead and high concurrency.}
+Caches are deployed on the request path to answer user requests very quickly.
+Thus, HOCs and aggregation-server caches needs to both respond quickly to requests and deliver high throughput.
+The main bottleneck of a caching system is object lookup, the admission, and the cache eviction policies.
+To maintain high throughput, all three operations must have a small processing overhead, i.e., a constant time complexity per request.
+Additionally, almost all caching systems use multiple cores and thus caching systems must support concurrent implementations.
+This means that caching operations must involve as few concurrency locks (e.g., mutexes) as possible, and often aim to be lock free~\cite{li2015architecting,lim2014mica,fan2013memc3}.
+To maintain high throughput, any changes to the caching system must not interfere with this design.
+
+\paragraph{CDN caches.}
+In addition to the low overhead and high concurrency requirements, the HOC must also not impede the performance of the overall CDN server.
+Specifically, changes to the HOC must not negatively affect the BHR and disk utilization of the DC.
+
+\paragraph{Aggregation caches.}
+In addition to the low overhead and high concurrency requirements, aggregation caches must also not impede the performance of aggregation servers.
+Specifically, changes to the aggregation cache must not add significant CPU or network load.
+
+
+
+\section{State of the art in caching systems}\label{bg:priorwork:cachingsystems}
+This section discusses the most widely used types of caching systems and surveys the academic literature on caching systems.
+
+\subsection{Production caching systems.}
+Almost all production systems (both in CDNs and data centers) use a variant of a simple caching system.
+Lookups are performed using a hash map or hash tree, which can be implemented concurrently~\cite{kamp2010you}.
+There is no admission policy (all objects get admitted into the cache).
+The cache evicts the least-recently-used (LRU) object.
+
+The intuition behind the common LRU policy is, that a recently-requested object is much more likely to get requested that an object from several minutes or hours ago.
+LRU is also widely considered to be robust against changes in the request traffic, as it makes few assumptions on the request pattern.
+LRU is also easy to implement: a linked list keeps track of the recency order, where the most-recently-used (MRU) object is kept at the head, and the LRU object at the tail of the list.
+Whenever an object is requested, it's position is reset to the head.
+Whenever an object needs to be evicted, LRU picks the lists' tail.
+
+In practice, the straightforward LRU implementation is actually very rare.
+The most common reason is that list-based implementations of LRU have inherent concurrent limits due to lock-competition for the head of the list~\cite{li2015architecting,lim2014mica,fan2013memc3}.
+Typical strategies include not always resetting objects to the LRU head (e.g., if they are not far from the head).
+Another strategy is to use a less-fine granular notion of recency which can be kept in a single lock-free ring buffer~\cite{fan2013memc3}.
+
+
+\begin{table*}[!ht]
+  \centering
+  \def\arraystretch{1.25}
+\footnotesize
+\hspace{0mm}
+  \begin{tabular}{| p{2.3cm}p{0.6cm}p{1cm}p{1.6cm}p{3.6cm}p{1.2cm}p{2.3cm}|}
+%\arrayrulecolor{gray}
+\hline
+   \rule{0pt}{8pt} Name & Year & Over-head & Admission Policy & Eviction Policy & \hspace{-2mm}Concurrent & Evaluation \\[1.3ex]
+%\hline
+\hline
+    \rule{0pt}{3pt}\cellcolor[HTML]{C0C0C0}\textbf{AdaptSize} & \cellcolor[HTML]{C0C0C0}\textbf{2016} & \cellcolor[HTML]{C0C0C0}\textbf{$O(1)$} & \cellcolor[HTML]{C0C0C0}\textbf{size} & \cellcolor[HTML]{C0C0C0}\textbf{recency} & \cellcolor[HTML]{C0C0C0}\textbf{yes} & \cellcolor[HTML]{C0C0C0}\textbf{implementation} \\[0.1ex]
+%\hline
+    Cliffhanger~\cite{cidon2016cliffhanger} & 2016 &  $O(1)$ & none & recency & no & implementation \\
+%\hline
+    Billion~\cite{li2015architecting} & 2015 &  $O(1)$ & none & recency & yes & implementation \\
+%\hline
+    BloomFilter~\cite{maggs2015algorithmic} & 2015 &  $O(1)$ & frequency & recency & no & implementation \\
+%\hline
+    SLRU~\cite{gast2015transient} & 2015 &  $O(1)$ & none & recency+frequency & no & analysis \\
+%\hline
+    Lama~\cite{hu2015lama} & 2015 &  $O(1)$ & none & recency & no & implementation \\
+%\hline
+    DynaCache~\cite{cidon2015dynacache} & 2015 &  $O(1)$ & none & recency & no & implementation \\
+%\hline
+    MICA~\cite{lim2014mica} & 2014 &  $O(1)$ & none & recency & yes & implementation \\
+%\hline
+    TLRU~\cite{einziger2014tinylfu} & 2014 &  $O(1)$ & frequency & recency & no & simulation \\
+%\hline
+    MemC3~\cite{fan2013memc3} & 2013 &  $O(1)$ & none & recency & yes & implementation \\
+%\hline
+    S4LRU~\cite{huang2013analysis} & 2013 &  $O(1)$ & none & recency+frequency & no & simulation \\
+%\hline
+    CFLRU~\cite{park2006cflru} & 2006 &  $O(1)$ & none & recency+cost & no & simulation \\
+%\hline
+    \mbox{Clock-Pro~\cite{jiang2005clock}} & 2005 &  $O(1)$ & none & recency+frequency & yes & simulation \\
+%\hline
+    CAR~\cite{bansal2004car} & 2004 &  $O(1)$ & none & recency+frequency & yes & simulation \\
+%\hline
+    ARC~\cite{megiddo2003arc} & 2003 &  $O(1)$ & none & recency+frequency & no & simulation \\
+%\hline
+    LIRS~\cite{jiang2002lirs} & 2002 &  $O(1)$ & none & recency+frequency & no & simulation \\
+%\hline
+    LUV~\cite{bahn2002efficient} & 2002 &  $O(\log n)$ & none & recency+size & no & simulation \\
+%\hline
+    MQ~\cite{zhou2001multi}  & 2001 &  $O(1)$ & none & recency+frequency & no & simulation \\
+%\hline
+    PGDS~\cite{cherkasova2001role} & 2001 &  $O(\log n)$ & none & recency+frequency+size & no & simulation \\
+%\hline
+    GD*~\cite{jin2001greedydual} & 2001 &  $O(\log n)$ & none & recency+frequency+size & no & simulation \\
+%\hline
+    LRU-S~\cite{starobinski2001probabilistic} & 2001 &  $O(1)$ & size & recency+size & no & simulation \\
+%\hline
+    LRV~\cite{rizzo2000replacement} & 2000 &  $O(\log n)$ & none & frequency+recency+size & no & simulation \\
+%\hline
+    \mbox{LFU-DA~\cite{arlitt2000evaluating,shah20101}} & 2000 &  $O(1)$ & none & frequency & no & simulation \\
+%\hline
+    LRFU~\cite{lee1999existence} & 1999 &  $O(\log n)$ & none & recency+frequency & no & simulation \\
+%\hline
+    PSS~\cite{aggarwal1999caching} & 1999 &  $O(\log n)$ & frequency & frequency+size & no & simulation \\
+%\hline
+    GDS~\cite{cao1997cost} & 1997 &  $O(\log n)$ & none & recency+size & no & simulation \\
+%\hline
+    Hybrid~\cite{wooster1997proxy} & 1997 &  $O(\log n)$ & none & recency+frequency+size & no & simulation \\
+% \hline
+    SIZE~\cite{abrams1996removal} & 1996 &  $O(\log n)$ & none & size & no & simulation \\
+%\hline
+    Hyper~\cite{abrams1996removal} & 1996 &  $O(\log n)$ & none & frequency+recency & no & simulation \\
+%\hline
+    Log2(SIZE)~\cite{abrams1995} & 1995 &  $O(\log n)$ & none & recency+size & no & simulation \\
+%\hline
+    LRU-MIN~\cite{abrams1995} & 1995 &  $O(n)$ & none & recency+size & no & simulation \\
+%\hline
+    Threshold~\cite{abrams1995} & 1995 &  $O(1)$ & size & recency & no & simulation \\
+%\hline
+    2Q~\cite{johnson19942q} & 1994 &  $O(1)$ & frequency & recency+frequency & no & simulation \\
+%\hline
+    LRU-K~\cite{o1993lru} & 1993 &  $O(\log n)$ & none & recency+frequency & no & implementation \\
+\hline
+  \end{tabular}
+  \caption{Historical overview of web caching systems.
+   While many sophisticated eviction policies combine different properties (indicated by a ``+'' in the eviction policy column), there are only two systems (other than AdaptSize) that use size-aware admission.
+   The complexity column shows that systems after 2002 have a constant per-request time complexity, whereas the complexity of some older systems depends on the number ($n$) of cached objects.
+   More recently, several systems introduced concurrent caching systems.
+         The last column distinguishes between evaluation through research-based prototypes (implementation) and simulation experiments.}
+  \label{tbl:history}
+\end{table*}
+
+\subsection{Academic caching systems.}
+The extensive body on related work on caching is surveyed in Table~\ref{tbl:history}.
+We survey 33 major caching systems that have been proposed in the research literature between 1993 and 2016.
+We classify these systems in terms of the per-request time complexity, the eviction and admission policies used, the support for a concurrent implementation, and the evaluation method.
+
+Not all of the 33 caching systems fulfill the low overhead design goal.
+Specifically, the complexity column in Table~\ref{tbl:history} shows that some proposals before 2002 have a computational overhead that scales logarithmically in the number of objects in the cache, which is impractical.
+The caching systems discussed in this thesis differ from these systems because they have a constant complexity, and a low synchronization overhead, which we demonstrated by incorporating our proposals into production caching systems.
+
+Of those caching systems that have a low overhead, almost none (except LRU-S and Threshold) incorporate object sizes. In particular, these systems admit and evict objects based only on recency, frequency, or a combination thereof.
+
+There are only four low-overhead caching systems that are size aware.
+Threshold~\cite{abrams1995} uses a static size threshold, which has to be determined in advance.
+The corresponding Static policy performs poorly in our experiments.
+LRU-S~\cite{starobinski2001probabilistic} uses size-aware admission, where it admits objects with probability $1/size$.
+Unfortunately, this static probability is too low in practice.
+The third system~\cite{neglia2016access} also uses a static parameter and was developed in parallel to AdaptSize.
+AdaptSize, is unique among the size-aware systems by automatically adapting the size-aware admission parameter over time.
+
+While tuning for size-based admission is entirely new, tuning has been used in other caching contexts such as tuning for the optimal balance between recency and frequency~\cite{johnson19942q,megiddo2003arc,lee1999existence,jiang2002lirs,zhou2001multi,bansal2004car,berger2015maximizing} and for the allocation of capacity to cache partitions~\cite{cidon2016cliffhanger,hu2015lama,cidon2015dynacache,saemundsson2014dynamic}.
+In these other contexts, the most common tuning approach is hill climbing with shadow caches~\cite{johnson19942q,megiddo2003arc,lee1999existence,jiang2002lirs,zhou2001multi,bansal2004car,cidon2016cliffhanger}.
+This approach often performs poorly when tuning size-aware admission in practice.
+
+Another method involves a prediction model together with a global search algorithm.
+The most widely used prediction model is the calculation of stack distances~\cite{mattson1970evaluation,almasi2002calculating,wires2014characterizing,waldspurger2015efficient}, which has been recently used as an alternative to shadow caches~\cite{saemundsson2014dynamic,cidon2015dynacache,saemundsson2014dynamic}.
+Unfortunately, the stack distance model is not suited to optimizing the parameters of an admission policy like in AdaptSize, since each admission parameter leads to a different request sequence and thus a different stack distance distribution that needs to be recalculated.
+The first caching systems proposed in this thesis, AdaptSize, introduces a new tuning model based on a Markov chain that is very different from existing tuning models.
+
+While most of these caching systems share our goal of improving the OHR, an orthogonal line of research seeks to achieve superior throughput using concurrent cache implementations (compare the concurrent implementation column in Table~\ref{tbl:history}).
+
+The last column in Table~\ref{tbl:history} shows that most recent caching systems are evaluated using prototype implementations.
+Likewise, we evaluate an actual implementation of AdaptSize of RobinHood through experiments in dedicated and shared data centers.
+We additionally use trace-driven simulations to compare to some of those systems that have only been used in simulations.
+
+
+\section{State of the art in cache performance modeling}\label{sec:bg:perfmodel}
+
+
+Online policies such as LRU and its variants are studied extensively in the literature~\cite{king1971analysis,gelenbe1973unified,coffman1973operating,mccabe1965serial,burville1973model,hendricks1972stationary,dan1990,tsukada2012fluid,flajolet1992birthday,fill1996distribution,jelenkovic1999asymptotic,dobrow1995move,rodrigues1995performance,jelenkovic1999performance,jelenkovic2004least,panagakis2008approximate,psounis2004modeling,gallo2012performance,young2000line,o1999optimality,fricker2012versatile,martina13,Berger20142,gast2015transient,berger2015maximizing}.
+A common theme in the literature is that all these models assume \emph{unit-sized objects} and focus on the eviction policy.
+
+Within the class of unit-size-object cache models, there are two major branches.
+
+In the first branch, people have modeled the entire state of the cache, tracking all objects in the cache and their ordering in the LRU list~\cite{king1971analysis,gelenbe1973unified,coffman1973operating,mccabe1965serial,burville1973model,hendricks1972stationary,flajolet1992birthday,fill1996distribution,dobrow1995move,rodrigues1995performance}.
+Classical works have compared LRU and FIFO (First-in-first-out) and have shown convergence between FIFO and RND (random eviction): \cite{king1971analysis} uses a Markov chain of the entire cache state to model LRU and FIFO, and \cite{gelenbe1973unified} uses an automaton model of the entire cache state \cite{gelenbe1973unified}
+While these models 100\% accurate, subsequent works found the solutions to be impractical when the number of objects is high, because of a combinatorial state space explosion.
+Subsequent work in this branch has thus derived numerical approximation methods~\cite{dan1990,flajolet1992birthday,fill1996distribution} or relaxed the problem to asymptotic distributions~\cite{jelenkovic1999asymptotic,dobrow1995move,rodrigues1995performance,jelenkovic1999performance,jelenkovic2004least,olivier2013performance}.
+
+In the second branch, people start with a model that is already an approximation and do not consider the entire state space.
+A popular method is due to Che et al.~\cite{che2002hierarchical} and thus often called the \emph{Che approximation}.
+The essential idea in this model is to collapse the state space to two states per object: either an object is cached (IN), or it is not (OUT).
+If an object in the IN state does not receive a request for a certain time, typically called the \emph{characteristic time}, then the object is assumed to transition to OUT.
+If an OUT state receives a request, is transition to IN.
+
+The intuition behind the Che approximation is that LRU works essentially as a frequency filter: objects, for which two consecutive requests are farther apart that the characteristic time, never receive a cache hit.
+This intuition has been supported using simulations~\cite{che2002hierarchical}, using mean-field theory analysis~\cite{fricker2012lru}, an in asymptotic fluid-limit analysis~\cite{osogami2010fluid}.
+Recent work has extended this approximation concept to LRU variants~\cite{fricker2012lru, bianchi2013check,martina13}.
+We remark that none of these models considers variable object sizes and size-aware admission.
+
+
+\section{State of the art in optimal caching}\label{sec:background:optimal}
+
+We define OPT as the optimal caching policy for a given cache size and a given trace, free of algorithm constraints such as the information available to the caching policy.
+Specifically, OPT is the offline optimal policy, which is has knowledge of the future and maximizes OHR (or minimizes OMR, equivalently).
+
+Very little is known about how to efficiently compute OPT with variable object sizes.
+On the theory side, the best known approximation algorithms give weak approximation guarantees and are computationally expensive.
+On the practical side, system builders use offline heuristics that are much cheaper to compute, but give no guarantee that they are close to OPT.
+This section surveys theoretical results on OPT and offline heuristics used in practice.
+
+\subsection{OPT with variable object sizes is hard}
+
+While OPT is simple to compute for equal-sized objects~\cite{belady,mattson}, computing OPT with variable object sizes is significantly harder.
+In fact, this problem has been recently shown to be strongly NP-complete~\cite{chorbak}, which means that no fully polynomial-time approximation scheme (FPTAS) can exist.%
+\footnote{The observation that no FPTAS can exist follows from Corollary 8.6 in~\cite{vazirani2013approximation} because OPT meets the assumptions of Theorem 8.5.}
+
+Though caching may seem similar to Bin-Packing or Knapsack, it is quite different because the trace imposes an order on requests that constrains OPT's choices in ways that are not captured by these problems or their variants.
+In fact, the proof in~\cite{chorbak} is by reduction from Vertex Cover, not Knapsack.
+Furthermore, unlike Bin-Packing and Knapsack variants which can be approximated well for limited (small) object sizes and costs,
+computing OPT remains strongly NP-complete even with just three object sizes~\cite{folwarczny2017general},
+and heuristics that work well on Knapsack perform badly in caching (see below).
+
+\subsection{Theoretical bounds on OPT}\label{sec:bg:offlinevarsize}
+
+\begin{table}[ht]
+\centering
+\begin{minipage}{\linewidth}
+  \resizebox{\linewidth}{!}{
+    \tiny
+  \begin{tabular}{cccc}
+    \toprule
+    \textbf{Technique} & \textbf{Time} & \textbf{Requests\,/\,24hrs} & \textbf{Approximation} \\
+    \midrule
+    OPT & NP-hard~\cite{chorbak} & <1\,K & 1\\
+    LP rounding & $\Omega(N^{5.6})$ & 50\,K & $O\!\left(\log\frac{\max_i\{ s_i\}}{\min_i\{ s_i\}}\right)$ \\
+    LocalRatio~\cite{bar2001unified} & $O(N^3)$ & 500\,K & $4$ \\
+    OFMA~\cite{irani1997page} & $O(N^2)$ & 28\,M & $O\!\left(\log C\right)$ \\
+    \bf FOO\footnote{FOO's approximation guarantee holds under independence assumptions.} & ${O(N^{3/2})}$ & 28\,M & 1 \\
+    \bf PFOO\footnote{PFOO does not have an approximation guarantee but its upper and lower bounds are within 6\% on average on production traces.} & ${O(N \log N)}$ & 250\,M & $\approx$1.06 \\
+    \bottomrule
+  \end{tabular}
+  }
+
+\vspace{.5mm}
+\footnotesize{Notation: $N$ is the trace length, $C$ is the cache capacity, and $s_i$ is the size of object $i$.}
+\vspace{-1mm}
+
+\end{minipage}
+  \vspace{0.5em}
+  \caption{Comparison of FOO and PFOO to prior bounds on OPT with variable object sizes.
+    Computing OPT is NP-hard.
+    Prior bounds~\cite{albers1999page,bar2001unified,irani1997page} provide only weak approximation guarantees, whereas FOO's bounds are tight.
+    PFOO performs well empirically and can be calculated for hundreds of millions of requests.}
+  \label{tbl:algos}
+\end{table}
+
+
+Prior work gives only three polynomial time bounds on OPT~\cite{albers1999page,bar2001unified,irani1997page}, which vary in time complexity and approximation guarantee.
+\autoref{tbl:algos} summarizes these bounds by comparing their asymptotic run-time, how many requests can be calculated in practice (e.g., within 24\,hrs), and their approximation guarantee.
+
+Albers et al.~\cite{albers1999page} propose an LP relaxation of OPT and a rounding scheme.
+Unfortunately, the LP requires $N^2$ variables, which leads to a high $\Omega(N^{5.6})$-time complexity~\cite{koufogiannakis2014nearly}.
+% The time complexity estimation applies to the widely-used Simplex and interior-point algorithms, for which even a single iteration step leads to this complexity~\cite{koufogiannakis2014nearly}.
+% Other LP solution algorithms have even higher complexity~\cite{koufogiannakis2014nearly}.
+Not only is this running time high, but the approximation factor is logarithmic in the ratio of largest to smallest object (e.g., around 30 on production traces), making this approach impractical.
+
+Bar et al.~\cite{bar2001unified} propose a general approximation framework (which we call \emph{LocalRatio}), which can be applied to the offline caching problem.
+This algorithm gives the best-known approximation guarantee, a factor of $4$.
+Unfortunately, this is still a weak guarantee, as for miss ratio of $0.4$, the offline optimal may lie anywhere between $0.1$ and $0.4$.
+Additionally, LocalRatio is a purely theoretical algorithm, with a high running time of $O(N^3)$, and which we believe had not been implemented prior to our work.
+Our implementation of LocalRatio can calculate up to 500\,K requests in 24\,hrs, which is only a small fraction of the length of production traces.
+
+Irani proposes the OFMA approximation algorithm~\cite{irani1997page}, which has $O(N^2)$ running time.
+This running time is small enough for our implementation of OFMA to run on small traces.
+Unfortunately, OFMA achieves a weak approximation guarantee, logarithmic in the cache capacity $C$,
+and in fact OFMA does badly on our traces, giving much weaker bounds than simple Belady-inspired heuristics.
+
+Hence, prior work that considers adversarial assumptions yields only weak approximation guarantees.
+%Additionally, their running times are generally too high to be practical.
+We therefore turn to stochastic assumptions to obtain tight bounds on the kinds of traces actually seen in practice.
+%% similar to prior work that proves optimality of online policies.
+Under independence assumptions, FOO achieves a tight approximation guarantee on OPT, unlike prior approximation algorithms,
+and has asymptotically better runtime, specifically $O\!\left(N^{3/2}\!\right)$.
+
+\bibliographystyle{unsrt}
+\bibliography{library}
+
+\end{document}
